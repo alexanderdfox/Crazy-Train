@@ -1,115 +1,136 @@
-# stage – Recursive Cross-User File Stager
+# Train – Bi-directional Process Pipeline
 
-Stages files and directories into a world-readable/writable shared workspace (`/tmp/fox_shared_space`) so any user on the machine can access them.
-
-Control-flow shape intentionally mirrors [aip.py](https://github.com/alexanderdfox/AIP/blob/main/aip.py) / sshp:
-
-| Concept (aip / sshp)     | This tool                          |
-|--------------------------|------------------------------------|
-| Target list              | `Target { id, source, rel }`       |
-| Child + State            | `Child` + `State` enum             |
-| max-jobs concurrency     | `tokio::sync::Semaphore`           |
-| Modes                    | `Files` / `Tree`                   |
-| Dry-run / debug          | `-n` / `-d`                        |
-| Aggregate exit status    | `0` if all ok, else `1`            |
+A lightweight Rust “train” that chains external programs (binaries, shell commands, or compiled Rust filters) together.  
+Each line in `cars.txt` becomes a car. Data travels forward through the cars; status / results can travel backward.  
+Supports both **straight-line** and **loop** (circular) topologies.
 
 ## Features
 
-- Recursive directory staging (default)
-- Concurrent copies with hard job limit (`-m`)
-- Preserves relative tree structure under the shared root
-- World permissions: directories `0777`, files `0666`
-- Dry-run mode
-- File list input (`-f`) or stdin (`-f -`)
-- Defaults to staging the current directory (works “on itself”)
+- One external command per line in `cars.txt`
+- Forward data flow + backward feedback
+- Optional circular mode (`loop`)
+- Clean shutdown with `Terminate` message
+- Works with any stdin/stdout program (Rust binaries, Python, shell tools, etc.)
 
-## Build
+## Quick Start
 
-Requires **Rust 1.70+** (edition 2021):
+```bash
+# 1. Create cars.txt
+cat > cars.txt << 'EOF'
+# Comments and blank lines are ignored
+cat
+tr 'a-z' 'A-Z'
+sed 's/BINARY/PROCESSED/'
+EOF
+
+# 2. Run in straight-line mode (default)
+cargo run
+
+# 3. Run in loop mode
+cargo run -- loop
+```
+
+## Command-line Usage
+
+```text
+cargo run [-- loop] [cars_file]
+```
+
+| Argument       | Meaning                                      |
+|----------------|----------------------------------------------|
+| *(none)*       | Straight-line mode, use `cars.txt`           |
+| `loop`         | Circular mode (last car feeds back to engine)|
+| `mycars.txt`   | Use a different cars file                    |
+| `loop mycars.txt` | Loop mode + custom file                   |
+
+Any argument containing the substring `loop` (case-insensitive) enables circular mode.
+
+## cars.txt Format
+
+```text
+# This is a comment
+cat
+tr 'a-z' 'A-Z'
+
+# Full path to a binary
+./target/release/myfilter
+
+# Shell one-liner
+python3 -c 'import sys; print(sys.stdin.read().upper())'
+
+# Another Rust binary
+/usr/local/bin/my_rust_tool
+```
+
+- Empty lines and lines starting with `#` are ignored.
+- Each remaining line is executed with `sh -c`.
+- The program must read from **stdin** and write to **stdout**.
+
+## Using Rust Code as a Car
+
+Rust source is **not** executed directly. Compile it first:
+
+```bash
+# filter.rs
+use std::io::{self, Read, Write};
+
+fn main() {
+    let mut data = Vec::new();
+    io::stdin().read_to_end(&mut data).unwrap();
+    let upper = String::from_utf8_lossy(&data).to_uppercase();
+    io::stdout().write_all(upper.as_bytes()).unwrap();
+}
+```
+
+```bash
+rustc -O filter.rs -o filter
+```
+
+Then add to `cars.txt`:
+
+```text
+./filter
+```
+
+## Architecture
+
+```
+Engine  →  Car 1  →  Car 2  →  …  →  Car N
+   ↑                                   │
+   └────────── (loop mode only) ───────┘
+```
+
+- **Straight mode**: data flows 1 → N, last car sends a `Backward` status message.
+- **Loop mode**: last car sends its output back to the engine as a `Forward` message.
+
+Each car is an independent OS process kept alive for the lifetime of the train.  
+Data is written to its stdin; the result is read from its stdout.
+
+## Example Session
+
+```bash
+$ cargo run
+Loading cars from 'cars.txt' – mode: STRAIGHT
+Train has 3 cars:
+   1. cat
+   2. tr 'a-z' 'A-Z'
+   3. sed 's/BINARY/PROCESSED/'
+Car 1 (cat) received 27 bytes
+Car 2 (tr 'a-z' 'A-Z') received 27 bytes
+Car 3 (sed 's/BINARY/PROCESSED/') received 27 bytes
+Feedback: Car 3 (sed 's/BINARY/PROCESSED/') finished – 30 bytes
+Train stopped.
+```
+
+## Building
 
 ```bash
 cargo build --release
-# binary: target/release/stage
+./target/release/train          # straight
+./target/release/train loop     # circular
 ```
 
-## Usage
+## License
 
-```
-stage [OPTIONS] [PATHS]...
-```
-
-### Options
-
-| Flag | Description |
-|------|-------------|
-| `-f, --file <FILE>` | Read paths from file (one per line). Use `-` for stdin |
-| `-m, --max-jobs <N>` | Max concurrent copy jobs (default: 8) |
-| `-r, --recursive` | Recurse into directories (default: true) |
-| `--no-recursive` | Disable recursion |
-| `--mode <MODE>` | `tree` (default) or `files` |
-| `-n, --dry-run` | Show what would be staged, do not copy |
-| `-d, --debug` | Verbose progress on stderr |
-| `-h, --help` | Print help |
-| `-V, --version` | Print version |
-
-### Modes
-
-- **`tree`** (default) – preserves directory structure under `/tmp/fox_shared_space`
-- **`files`** – stages only regular files (directories are skipped as targets)
-
-## Examples
-
-```bash
-# Stage the current directory recursively (default behaviour)
-./target/release/stage
-
-# Stage specific paths with higher concurrency
-./target/release/stage -m 16 src/ Cargo.toml README.md
-
-# Dry-run
-./target/release/stage -n -d
-
-# Paths from a file
-./target/release/stage -f paths.txt
-
-# Paths from stdin
-find . -name '*.rs' | ./target/release/stage -f -
-
-# Files-only mode
-./target/release/stage --mode files -r /some/project
-```
-
-## Output
-
-On success each staged destination path is printed to stdout:
-
-```
-/tmp/fox_shared_space/src/main.rs
-/tmp/fox_shared_space/Cargo.toml
-...
-```
-
-Exit codes:
-
-- `0` – everything staged successfully  
-- `1` – one or more failures  
-- `2` – usage / no targets  
-
-## Layout
-
-```
-src/
-  main.rs          # clap CLI + main_loop + staging logic
-Cargo.toml
-.gitignore
-README.md
-```
-
-## Notes
-
-- The shared root `/tmp/fox_shared_space` is created automatically and given `0777` permissions.
-- Intermediate directories created during staging also receive `0777`.
-- Files receive `0666`.
-- Symlinks are not followed (`WalkDir::follow_links(false)`).
-- The tool is intentionally single-purpose and dependency-light (clap, tokio, walkdir).
+MIT
 ```
