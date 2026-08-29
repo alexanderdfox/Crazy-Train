@@ -35,28 +35,6 @@ impl TrainCar {
 		loop_mode: bool,
 	) -> JoinHandle<()> {
 		thread::spawn(move || {
-			// Spawn the external process once and keep it alive
-			let mut child = match Command::new("sh")
-				.arg("-c")
-				.arg(&self.cmd)
-				.stdin(Stdio::piped())
-				.stdout(Stdio::piped())
-				.stderr(Stdio::inherit())
-				.spawn()
-			{
-				Ok(c) => c,
-				Err(e) => {
-					let _ = tx_back.send(TrainMsg::Backward(format!(
-						"Car {} failed to start '{}': {}",
-						self.id, self.cmd, e
-					)));
-					return;
-				}
-			};
-
-			let mut stdin = child.stdin.take().expect("stdin");
-			let mut stdout = child.stdout.take().expect("stdout");
-
 			loop {
 				// Prefer forward traffic
 				match rx_in.recv_timeout(Duration::from_millis(10)) {
@@ -68,27 +46,54 @@ impl TrainCar {
 							data.len()
 						);
 
-						// Feed data to the process
+						// Spawn a fresh process for this chunk.
+						// Closing stdin after the write gives the child EOF,
+						// so read_to_end is guaranteed to return.
+						let mut child = match Command::new("sh")
+							.arg("-c")
+							.arg(&self.cmd)
+							.stdin(Stdio::piped())
+							.stdout(Stdio::piped())
+							.stderr(Stdio::inherit())
+							.spawn()
+						{
+							Ok(c) => c,
+							Err(e) => {
+								let _ = tx_back.send(TrainMsg::Backward(format!(
+									"Car {} failed to start '{}': {}",
+									self.id, self.cmd, e
+								)));
+								continue;
+							}
+						};
+
+						let mut stdin = child.stdin.take().expect("stdin");
+						let mut stdout = child.stdout.take().expect("stdout");
+
+						// Feed data then close stdin → child sees EOF
 						if let Err(e) = stdin.write_all(&data) {
 							let _ = tx_back.send(TrainMsg::Backward(format!(
 								"Car {} write error: {}",
 								self.id, e
 							)));
-							break;
+							let _ = child.kill();
+							continue;
 						}
-						let _ = stdin.flush();
+						drop(stdin); // critical: close the pipe
 
-						// Read the processed result (simple blocking read for demo)
+						// Now safe – process will eventually exit and close stdout
 						let mut output = Vec::new();
 						if let Err(e) = stdout.read_to_end(&mut output) {
-							// process may still be running – ignore partial reads
-							if e.kind() != io::ErrorKind::UnexpectedEof {
-								let _ = tx_back.send(TrainMsg::Backward(format!(
-									"Car {} read error: {}",
-									self.id, e
-								)));
-							}
+							let _ = tx_back.send(TrainMsg::Backward(format!(
+								"Car {} read error: {}",
+								self.id, e
+							)));
+							let _ = child.kill();
+							continue;
 						}
+
+						// Wait for the child so we don't leave zombies
+						let _ = child.wait();
 
 						// If the process produced nothing, pass original data through
 						if output.is_empty() {
@@ -115,16 +120,12 @@ impl TrainCar {
 						}
 					}
 					Ok(TrainMsg::Terminate) => {
-						let _ = child.kill();
 						let _ = tx_out.send(TrainMsg::Terminate);
 						break;
 					}
 					Ok(TrainMsg::Backward(_)) => {}
 					Err(mpsc::RecvTimeoutError::Timeout) => {}
-					Err(mpsc::RecvTimeoutError::Disconnected) => {
-						let _ = child.kill();
-						break;
-					}
+					Err(mpsc::RecvTimeoutError::Disconnected) => break,
 				}
 
 				// Drain backward feedback
@@ -135,8 +136,6 @@ impl TrainCar {
 					}
 				}
 			}
-
-			let _ = child.wait();
 		})
 	}
 }
@@ -152,15 +151,14 @@ impl TrainEngine {
 	fn assemble(commands: Vec<String>, loop_mode: bool) -> Self {
 		assert!(!commands.is_empty(), "cars.txt produced no commands");
 
+		let n = commands.len();
 		let (engine_tx, mut next_rx_in) = mpsc::channel();
 		let (mut next_tx_back, engine_rx_back) = mpsc::channel();
-
-		let mut car_handles = Vec::with_capacity(commands.len());
+		let mut car_handles = Vec::with_capacity(n);
 
 		for (i, cmd) in commands.into_iter().enumerate() {
 			let id = i + 1;
-			let is_last = id == car_handles.capacity();
-
+			let is_last = id == n;
 			let (tx_out, rx_in) = mpsc::channel();
 			let (tx_back, rx_back) = mpsc::channel();
 
@@ -199,7 +197,6 @@ impl TrainEngine {
 fn load_cars(path: &str) -> io::Result<Vec<String>> {
 	let file = fs::File::open(path)?;
 	let reader = io::BufReader::new(file);
-
 	let mut cmds = Vec::new();
 	for line in reader.lines() {
 		let line = line?;
@@ -215,7 +212,6 @@ fn load_cars(path: &str) -> io::Result<Vec<String>> {
 fn main() {
 	let args: Vec<String> = env::args().collect();
 	let loop_mode = args.iter().any(|a| a.to_lowercase().contains("loop"));
-
 	let cars_file = args
 		.iter()
 		.find(|a| a.ends_with(".txt"))
