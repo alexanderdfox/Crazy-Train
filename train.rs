@@ -33,6 +33,8 @@ impl TrainCar {
 		tx_back: Sender<TrainMsg>,
 		is_last: bool,
 		loop_mode: bool,
+		log_mode: bool,
+		loop_tx: Option<Sender<TrainMsg>>,
 	) -> JoinHandle<()> {
 		thread::spawn(move || {
 			loop {
@@ -47,8 +49,6 @@ impl TrainCar {
 						);
 
 						// Spawn a fresh process for this chunk.
-						// Closing stdin after the write gives the child EOF,
-						// so read_to_end is guaranteed to return.
 						let mut child = match Command::new("sh")
 							.arg("-c")
 							.arg(&self.cmd)
@@ -81,7 +81,7 @@ impl TrainCar {
 						}
 						drop(stdin); // critical: close the pipe
 
-						// Now safe – process will eventually exit and close stdout
+						// Read output from the process
 						let mut output = Vec::new();
 						if let Err(e) = stdout.read_to_end(&mut output) {
 							let _ = tx_back.send(TrainMsg::Backward(format!(
@@ -97,12 +97,24 @@ impl TrainCar {
 
 						// If the process produced nothing, pass original data through
 						if output.is_empty() {
-							output = data;
+							output = data.clone();
+						}
+
+						// Print the log to stdout if log mode is enabled
+						if log_mode {
+							println!(
+								"[Car {} Log] Output ({} bytes): {:?}",
+								self.id,
+								output.len(),
+								String::from_utf8_lossy(&output)
+							);
 						}
 
 						if is_last {
 							if loop_mode {
-								let _ = tx_back.send(TrainMsg::Forward(output));
+								if let Some(ref l_tx) = loop_tx {
+									let _ = l_tx.send(TrainMsg::Forward(output));
+								}
 							} else {
 								let _ = tx_back.send(TrainMsg::Backward(format!(
 									"Car {} ({}) finished – {} bytes",
@@ -148,7 +160,7 @@ struct TrainEngine {
 }
 
 impl TrainEngine {
-	fn assemble(commands: Vec<String>, loop_mode: bool) -> Self {
+	fn assemble(commands: Vec<String>, loop_mode: bool, log_mode: bool) -> Self {
 		assert!(!commands.is_empty(), "cars.txt produced no commands");
 
 		let n = commands.len();
@@ -162,6 +174,12 @@ impl TrainEngine {
 			let (tx_out, rx_in) = mpsc::channel();
 			let (tx_back, rx_back) = mpsc::channel();
 
+			let loop_tx = if is_last && loop_mode {
+				Some(engine_tx.clone())
+			} else {
+				None
+			};
+
 			let car = TrainCar::new(id, cmd);
 			let handle = car.attach(
 				next_rx_in,
@@ -170,6 +188,8 @@ impl TrainEngine {
 				next_tx_back,
 				is_last,
 				loop_mode,
+				log_mode,
+				loop_tx,
 			);
 			car_handles.push(handle);
 
@@ -212,6 +232,7 @@ fn load_cars(path: &str) -> io::Result<Vec<String>> {
 fn main() {
 	let args: Vec<String> = env::args().collect();
 	let loop_mode = args.iter().any(|a| a.to_lowercase().contains("loop"));
+	let log_mode = args.iter().any(|a| a.to_lowercase() == "--log");
 	let cars_file = args
 		.iter()
 		.find(|a| a.ends_with(".txt"))
@@ -219,9 +240,10 @@ fn main() {
 		.unwrap_or("cars.txt");
 
 	println!(
-		"Loading cars from '{}' – mode: {}",
+		"Loading cars from '{}' – mode: {} | logging: {}",
 		cars_file,
-		if loop_mode { "LOOP" } else { "STRAIGHT" }
+		if loop_mode { "LOOP" } else { "STRAIGHT" },
+		if log_mode { "ON" } else { "OFF" }
 	);
 
 	let commands = match load_cars(cars_file) {
@@ -241,7 +263,7 @@ fn main() {
 		println!("  {:2}. {}", i + 1, c);
 	}
 
-	let engine = TrainEngine::assemble(commands, loop_mode);
+	let engine = TrainEngine::assemble(commands, loop_mode, log_mode);
 
 	// Demo payload
 	let payload = b"BINARY_CHUNK_01 hello world".to_vec();
