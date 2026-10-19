@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pi Digit Train on 10x10 Grid</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background-color: #0f172a;
+            color: #f8fafc;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+        }
+
+        h2 {
+            margin-bottom: 5px;
+            letter-spacing: 0.5px;
+        }
+
+        #info {
+            font-size: 0.95rem;
+            color: #94a3b8;
+            margin-bottom: 20px;
+            font-family: monospace;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(10, 48px);
+            grid-template-rows: repeat(10, 48px);
+            gap: 6px;
+            background: #1e293b;
+            padding: 16px;
+            border-radius: 16px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+        }
+
+        .cell {
+            background: #334155;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            color: #64748b;
+            font-weight: 500;
+            transition: all 0.25s ease-in-out;
+        }
+
+        /* Train styling */
+        .train-head {
+            background: #38bdf8 !important;
+            color: #0f172a !important;
+            font-weight: bold;
+            transform: scale(1.08);
+            box-shadow: 0 0 15px rgba(56, 189, 248, 0.7);
+            z-index: 10;
+        }
+
+        .train-body-1 { background: #0284c7 !important; color: #e2e8f0 !important; }
+        .train-body-2 { background: #0369a1 !important; color: #cbd5e1 !important; }
+        .train-body-3 { background: #075985 !important; color: #94a3b8 !important; }
+    </style>
+</head>
+<body>
+
+    <h2>Pi Digit Train Algorithm</h2>
+    <div id="info">Initializing train...</div>
+    <div class="grid" id="grid"></div>
+
+    <script>
+        // High-precision sequence of Pi decimals (3.14159...)
+        const piString = "314159265358979323846264338327950288419716939937510582097494459230781640628620899862803482534211706798214808651328230664709384460955058223172535940812848111745028410270193852110555964462294895493038196";
+        
+        const gridElement = document.getElementById('grid');
+        const infoElement = document.getElementById('info');
+        const cells = [];
+        const trainLength = 4; // Head + 3 tail cars
+        let history = [];
+        let pointer = 0;
+
+        // 1. Build the 10x10 Grid DOM elements
+        for (let i = 0; i < 100; i++) {
+            const cell = document.createElement('div');
+            cell.className = 'cell';
+            cell.innerText = i; // Shows cell index lightly
+            gridElement.appendChild(cell);
+            cells.push(cell);
+        }
+
+        // 2. Algorithm Step Function
+        function stepTrain() {
+            // Loop back to start if we run out of digits
+            if (pointer + 1 >= piString.length) {
+                pointer = 0;
+            }
+
+            // Extract row and column from adjacent pi digits
+            const row = parseInt(piString[pointer], 10);
+            const col = parseInt(piString[pointer + 1], 10);
+            const index = row * 10 + col;
+
+            // Update UI status text
+            infoElement.innerHTML = `Pi Digits: <b>${piString[pointer]}</b>, <b>${piString[pointer+1]}</b> &rarr; Target: Row ${row}, Col ${col} (Cell #${index})`;
+
+            // Update train history queue
+            history.unshift(index);
+            if (history.length > trainLength) {
+                history.pop();
+            }
+
+            // Reset all cell classes
+            cells.forEach((c, idx) => {
+                c.className = 'cell';
+            });
+
+            // Render train head and body parts
+            history.forEach((idx, position) => {
+                if (position === 0) {
+                    cells[idx].className = 'cell train-head';
+                } else {
+                    cells[idx].className = `cell train-body-${position}`;
+                }
+            });
+
+            // Advance pointer by 1 for smooth overlapping slide
+            pointer++;
+        }
+
+        // Run the train tick every 400 milliseconds
+        setInterval(stepTrain, 400);
+    </script>
+</body>
+</html>
